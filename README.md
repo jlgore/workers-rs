@@ -257,6 +257,60 @@ binding = "BUILD_WORKFLOW"
 class_name = "BuildWorkflow"
 ```
 
+Workflows can also be defined in Rust. Apply `#[workflow]` to the exported
+struct and implement `WorkflowEntrypoint`:
+
+```rust
+use serde::{Deserialize, Serialize};
+use worker::*;
+
+#[derive(Deserialize)]
+pub struct BuildInput {
+    commit: String,
+}
+
+#[derive(Serialize)]
+pub struct BuildOutput {
+    artifact: String,
+}
+
+#[workflow]
+pub struct BuildWorkflow;
+
+impl WorkflowEntrypoint for BuildWorkflow {
+    type Input = BuildInput;
+    type Output = BuildOutput;
+
+    fn new(_ctx: Context, _env: Env) -> Self {
+        Self
+    }
+
+    async fn run(
+        &self,
+        event: WorkflowEvent<Self::Input>,
+        step: WorkflowStep,
+    ) -> Result<Self::Output> {
+        let commit = event.payload.commit;
+        let artifact = step
+            .do_("build commit", move |_| async move {
+                Ok(format!("artifacts/{commit}.tar.gz"))
+            })
+            .config(WorkflowStepConfig::new().retries(
+                WorkflowRetryConfig::new(3, "5 seconds")
+                    .backoff(WorkflowBackoff::Exponential),
+            ))
+            .await?;
+
+        Ok(BuildOutput { artifact })
+    }
+}
+```
+
+`WorkflowStep` also provides `sleep`, `sleep_until`, `wait_for_event`, and
+`do_raw` for structured-clone values that cannot be represented through Serde.
+Step names should remain stable because the Workflows runtime uses them to
+persist and replay results.
+
 See the [Artifacts Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/)
 and [Workflows Workers API](https://developers.cloudflare.com/workflows/build/workers-api/) for
 platform configuration and behavior.

@@ -1,4 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+$WORKFLOW_IMPORT
 import * as exports from "./index.js";
 
 Error.stackTraceLimit = 100;

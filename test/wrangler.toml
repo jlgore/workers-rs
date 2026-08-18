@@ -37,6 +37,11 @@ bindings = [
 dataset = "http"
 binding = "HTTP_ANALYTICS"
 
+[[workflows]]
+name = "test-rust-workflow"
+binding = "TEST_WORKFLOW"
+class_name = "TestWorkflow"
+
 [[d1_databases]]
 binding = 'DB'
 database_name = 'my_db'

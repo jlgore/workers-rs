@@ -1,4 +1,4 @@
-use js_sys::{Array, Promise};
+use js_sys::{Array, Function, Promise};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -18,6 +18,51 @@ extern "C" {
 
     #[wasm_bindgen(method, catch, js_name = deleteBatch)]
     pub fn delete_batch(this: &Workflow, instance_ids: &Array) -> Result<Promise, JsValue>;
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(extends = js_sys::Object)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub type WorkflowStep;
+
+    #[wasm_bindgen(method, catch, js_name = do)]
+    pub fn do_(this: &WorkflowStep, name: &str, callback: &Function) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = do)]
+    pub fn do_with_config(
+        this: &WorkflowStep,
+        name: &str,
+        config: &JsValue,
+        callback: &Function,
+    ) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(method, catch)]
+    pub fn sleep(this: &WorkflowStep, name: &str, duration: &JsValue) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = sleepUntil)]
+    pub fn sleep_until(
+        this: &WorkflowStep,
+        name: &str,
+        timestamp: &JsValue,
+    ) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = waitForEvent)]
+    pub fn wait_for_event(
+        this: &WorkflowStep,
+        name: &str,
+        options: &JsValue,
+    ) -> Result<Promise, JsValue>;
+}
+
+#[wasm_bindgen(module = "cloudflare:workflows")]
+extern "C" {
+    #[wasm_bindgen(extends = js_sys::Error)]
+    #[derive(Debug, Clone)]
+    pub type NonRetryableError;
+
+    #[wasm_bindgen(constructor)]
+    pub fn new(message: &str) -> NonRetryableError;
 }
 
 #[wasm_bindgen]
