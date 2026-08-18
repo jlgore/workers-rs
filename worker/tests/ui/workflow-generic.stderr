@@ -1,0 +1,5 @@
+error: Workflow entrypoint structs cannot be generic
+ --> tests/ui/workflow-generic.rs:4:27
+  |
+4 | pub struct GenericWorkflow<T>(T);
+  |                           ^^^

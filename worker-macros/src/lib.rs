@@ -1,6 +1,7 @@
 mod durable_object;
 mod event;
 mod send;
+mod workflow;
 
 use proc_macro::TokenStream;
 
@@ -56,6 +57,18 @@ use proc_macro::TokenStream;
 #[proc_macro_attribute]
 pub fn durable_object(attr: TokenStream, item: TokenStream) -> TokenStream {
     durable_object::expand_macro(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Export a Rust struct as a Cloudflare Workflow entrypoint.
+///
+/// The struct must implement `worker::WorkflowEntrypoint`. The generated
+/// build metadata is consumed by `worker-build`, which exports a JavaScript
+/// class extending `cloudflare:workers`' `WorkflowEntrypoint`.
+#[proc_macro_attribute]
+pub fn workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
+    workflow::expand_macro(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

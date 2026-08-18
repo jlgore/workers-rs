@@ -14,7 +14,10 @@ const WORKER_SUBDIR: &str = "worker";
 
 const SHIM_TEMPLATE: &str = include_str!("./js/shim-legacy.js");
 
-use crate::binary::{Esbuild, GetBinary};
+use crate::{
+    binary::{Esbuild, GetBinary},
+    discover_wasm_exports, render_legacy_workflow_exports,
+};
 
 pub fn process(out_dir: &Path) -> Result<()> {
     let esbuild_path = Esbuild.get_binary(None)?.0;
@@ -22,16 +25,41 @@ pub fn process(out_dir: &Path) -> Result<()> {
     create_worker_dir(out_dir)?;
     copy_generated_code_to_worker_dir(out_dir)?;
 
-    let shim_template = match env::var("CUSTOM_SHIM") {
-        Ok(path) => {
-            let path = Path::new(&path).to_owned();
+    let custom_shim = env::var("CUSTOM_SHIM").ok();
+    let shim_template = match custom_shim.as_deref() {
+        Some(path) => {
+            let path = Path::new(path).to_owned();
             println!("Using custom shim from {}", path.display());
             // NOTE: we fail in case that file doesnt exist or something else happens
             read_to_string(&path)
                 .with_context(|| format!("Failed to read custom shim from {}", path.display()))?
         }
-        Err(_) => SHIM_TEMPLATE.to_owned(),
+        None => SHIM_TEMPLATE.to_owned(),
     };
+
+    let generated_code_path = worker_path(out_dir, format!("{OUT_NAME}_bg.js"));
+    let generated_code = read_to_string(&generated_code_path).with_context(|| {
+        format!(
+            "Failed to read generated JavaScript from {}",
+            generated_code_path.display()
+        )
+    })?;
+    let exports = discover_wasm_exports(&generated_code)?;
+    if !exports.workflow_entrypoints.is_empty()
+        && custom_shim.is_some()
+        && (!shim_template.contains("$WORKFLOW_IMPORT")
+            || !shim_template.contains("$WORKFLOW_EXPORTS"))
+    {
+        anyhow::bail!(
+            "CUSTOM_SHIM must contain $WORKFLOW_IMPORT and $WORKFLOW_EXPORTS placeholders when exporting a Workflow entrypoint"
+        );
+    }
+    let workflow_import = if exports.workflow_entrypoints.is_empty() {
+        ""
+    } else {
+        "import { WorkflowEntrypoint } from \"cloudflare:workers\";"
+    };
+    let workflow_exports = render_legacy_workflow_exports(&exports)?;
 
     let wait_until_response = if env::var("RUN_TO_COMPLETION").is_ok() {
         "this.ctx.waitUntil(response);"
@@ -95,7 +123,9 @@ pub fn process(out_dir: &Path) -> Result<()> {
     let shim = shim_template
         .replace("$WAIT_UNTIL_RESPONSE", wait_until_response)
         .replace("$SNIPPET_JS_IMPORTS", &js_imports)
-        .replace("$SNIPPET_WASM_IMPORTS", &wasm_imports);
+        .replace("$SNIPPET_WASM_IMPORTS", &wasm_imports)
+        .replace("$WORKFLOW_IMPORT", workflow_import)
+        .replace("$WORKFLOW_EXPORTS", &workflow_exports);
 
     write_string_to_file(worker_path(out_dir, "shim.js"), shim)?;
 
@@ -170,6 +200,7 @@ fn bundle(out_dir: &Path, esbuild_path: &Path) -> Result<()> {
         "--external:cloudflare:email",
         "--external:cloudflare:sockets",
         "--external:cloudflare:workers",
+        "--external:cloudflare:workflows",
         "--format=esm",
         "--bundle",
         "./shim.js",

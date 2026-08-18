@@ -139,40 +139,80 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-fn generate_handlers(out_dir: &Path) -> Result<String> {
-    let index_path = output_path(out_dir, "index.js");
-    let content = fs::read_to_string(&index_path)
-        .with_context(|| format!("Failed to read {}", index_path.display()))?;
+const WORKFLOW_ENTRYPOINT_MARKER_PREFIX: &str = "__worker_workflow_entrypoint_";
 
-    // Extract ESM function exports from the wasm-bindgen generated output.
-    // This code is specialized to what wasm-bindgen outputs for ESM and is therefore
-    // brittle to upstream changes. It is comprehensive to current output patterns though.
-    // TODO: Convert this to Wasm binary exports analysis for entry point detection instead.
-    let mut func_names = Vec::new();
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WasmExports {
+    functions: Vec<String>,
+    classes: Vec<String>,
+    workflow_entrypoints: Vec<String>,
+}
+
+fn is_valid_javascript_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('a'..='z' | 'A'..='Z' | '_' | '$'))
+        && chars
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$'))
+}
+
+fn discover_wasm_exports(content: &str) -> Result<WasmExports> {
+    let mut exports = WasmExports::default();
+
+    // Extract ESM exports from the wasm-bindgen generated output. This is specialized to what
+    // wasm-bindgen currently emits and should eventually be replaced with Wasm export analysis.
     for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("export function") {
-            if let Some(bracket_pos) = rest.find("(") {
-                let func_name = rest[..bracket_pos].trim();
-                // strip the exported function (we re-wrap all handlers)
-                if !SYSTEM_FNS.contains(&func_name) {
-                    func_names.push(func_name);
-                }
-            }
+        let function_name = if let Some(rest) = line.strip_prefix("export function") {
+            rest.find('(').map(|position| rest[..position].trim())
         } else if let Some(rest) = line.strip_prefix("export {") {
-            if let Some(as_pos) = rest.find(" as ") {
-                let rest = &rest[as_pos + 4..];
-                if let Some(brace_pos) = rest.find("}") {
-                    let func_name = rest[..brace_pos].trim();
-                    if !SYSTEM_FNS.contains(&func_name) {
-                        func_names.push(func_name);
-                    }
-                }
+            rest.find(" as ").and_then(|position| {
+                let alias = &rest[position + 4..];
+                alias.find('}').map(|end| alias[..end].trim())
+            })
+        } else {
+            None
+        };
+
+        if let Some(function_name) = function_name {
+            if let Some(class_name) = function_name.strip_prefix(WORKFLOW_ENTRYPOINT_MARKER_PREFIX)
+            {
+                anyhow::ensure!(
+                    is_valid_javascript_identifier(class_name),
+                    "invalid Workflow entrypoint class name in build marker: {class_name}"
+                );
+                anyhow::ensure!(
+                    !exports
+                        .workflow_entrypoints
+                        .iter()
+                        .any(|name| name == class_name),
+                    "duplicate Workflow entrypoint build marker for {class_name}"
+                );
+                exports.workflow_entrypoints.push(class_name.to_owned());
+            } else if !SYSTEM_FNS.contains(&function_name) {
+                exports.functions.push(function_name.to_owned());
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("export class ") {
+            if let Some(brace_position) = rest.find('{') {
+                exports
+                    .classes
+                    .push(rest[..brace_position].trim().to_owned());
             }
         }
     }
 
+    Ok(exports)
+}
+
+fn generate_handlers(out_dir: &Path) -> Result<String> {
+    let index_path = output_path(out_dir, "index.js");
+    let content = fs::read_to_string(&index_path)
+        .with_context(|| format!("Failed to read {}", index_path.display()))?;
+    let exports = discover_wasm_exports(&content)?;
+
     let mut handlers = String::new();
-    for func_name in func_names {
+    for func_name in exports.functions {
         if func_name == "fetch" && env::var("RUN_TO_COMPLETION").is_ok() {
             handlers += "Entrypoint.prototype.fetch = async function fetch(request) {
   let response = exports.fetch(request, this.env, this.ctx);
@@ -203,29 +243,73 @@ fn generate_handlers(out_dir: &Path) -> Result<String> {
 
 static SYSTEM_FNS: &[&str] = &["__wbg_reset_state", "__worker_init_state"];
 
+fn render_export_wrappers(exports: &WasmExports) -> Result<String> {
+    validate_workflow_entrypoints(exports)?;
+
+    let mut wrappers = String::new();
+    for class_name in &exports.classes {
+        if exports
+            .workflow_entrypoints
+            .iter()
+            .any(|entrypoint| entrypoint == class_name)
+        {
+            wrappers.push_str(&format!(
+                "export const {class_name} = new Proxy(\n  class {class_name} extends WorkflowEntrypoint {{\n    constructor(ctx, env) {{\n      super(ctx, env);\n      this.inner = new exports.{class_name}(ctx, env);\n    }}\n\n    run(event, step) {{\n      return this.inner.run(event, step);\n    }}\n  }},\n  classProxyHooks,\n);\n"
+            ));
+        } else {
+            wrappers.push_str(&format!(
+                "export const {class_name} = new Proxy(exports.{class_name}, classProxyHooks);\n"
+            ));
+        }
+    }
+
+    Ok(wrappers)
+}
+
+fn validate_workflow_entrypoints(exports: &WasmExports) -> Result<()> {
+    for workflow_entrypoint in &exports.workflow_entrypoints {
+        anyhow::ensure!(
+            exports
+                .classes
+                .iter()
+                .any(|class_name| class_name == workflow_entrypoint),
+            "Workflow entrypoint {workflow_entrypoint} does not have a matching class export"
+        );
+    }
+
+    Ok(())
+}
+
+fn render_legacy_workflow_exports(exports: &WasmExports) -> Result<String> {
+    validate_workflow_entrypoints(exports)?;
+
+    let mut wrappers = String::new();
+    for class_name in &exports.workflow_entrypoints {
+        wrappers.push_str(&format!(
+            "export class {class_name} extends WorkflowEntrypoint {{\n  constructor(ctx, env) {{\n    super(ctx, env);\n    this.inner = new imports.{class_name}(ctx, env);\n  }}\n\n  run(event, step) {{\n    return this.inner.run(event, step);\n  }}\n}}\n"
+        ));
+    }
+
+    Ok(wrappers)
+}
+
 fn add_export_wrappers(out_dir: &Path) -> Result<()> {
     let index_path = output_path(out_dir, "index.js");
     let content = fs::read_to_string(&index_path)
         .with_context(|| format!("Failed to read {}", index_path.display()))?;
 
-    let mut class_names = Vec::new();
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("export class ") {
-            if let Some(brace_pos) = rest.find("{") {
-                let class_name = rest[..brace_pos].trim();
-                class_names.push(class_name.to_string());
-            }
-        }
-    }
+    let exports = discover_wasm_exports(&content)?;
 
     let shim_path = output_path(out_dir, "shim.js");
     let mut output = fs::read_to_string(&shim_path)
         .with_context(|| format!("Failed to read {}", shim_path.display()))?;
-    for class_name in class_names {
-        output.push_str(&format!(
-            "export const {class_name} = new Proxy(exports.{class_name}, classProxyHooks);\n"
-        ));
-    }
+    let workflow_import = if exports.workflow_entrypoints.is_empty() {
+        ""
+    } else {
+        "import { WorkflowEntrypoint } from \"cloudflare:workers\";"
+    };
+    output = output.replace("$WORKFLOW_IMPORT", workflow_import);
+    output.push_str(&render_export_wrappers(&exports)?);
     fs::write(&shim_path, output)
         .with_context(|| format!("Failed to write {}", shim_path.display()))?;
     Ok(())
@@ -373,6 +457,7 @@ fn bundle(out_dir: &Path, esbuild_path: &Path) -> Result<()> {
         "--external:cloudflare:email",
         "--external:cloudflare:sockets",
         "--external:cloudflare:workers",
+        "--external:cloudflare:workflows",
         "--format=esm",
         "--bundle",
         "./shim.js",
@@ -410,7 +495,10 @@ pub fn output_path(out_dir: &Path, name: impl AsRef<str>) -> PathBuf {
 
 #[cfg(test)]
 mod test {
-    use super::parse_wasm_pack_opts;
+    use super::{
+        discover_wasm_exports, parse_wasm_pack_opts, render_export_wrappers,
+        render_legacy_workflow_exports,
+    };
     #[test]
     fn test_wasm_pack_args_build_arg() {
         let args = vec!["--release".to_owned()];
@@ -430,5 +518,65 @@ mod test {
         let args = vec!["--out-dir".to_owned(), "dist/worker".to_owned()];
         let result = parse_wasm_pack_opts(args).unwrap();
         assert_eq!(result.out_dir, "dist/worker");
+    }
+
+    #[test]
+    fn discovers_workflow_entrypoint_markers_without_treating_them_as_handlers() {
+        let source = r#"
+export function fetch(arg0, arg1, arg2) {}
+export function __worker_workflow_entrypoint_OrderWorkflow() {}
+export class Counter {}
+export class OrderWorkflow {}
+"#;
+
+        let exports = discover_wasm_exports(source).unwrap();
+
+        assert_eq!(exports.functions, vec!["fetch"]);
+        assert_eq!(exports.classes, vec!["Counter", "OrderWorkflow"]);
+        assert_eq!(exports.workflow_entrypoints, vec!["OrderWorkflow"]);
+    }
+
+    #[test]
+    fn renders_real_workflow_subclasses_and_keeps_normal_class_proxies() {
+        let source = r#"
+export function __worker_workflow_entrypoint_OrderWorkflow() {}
+export class Counter {}
+export class OrderWorkflow {}
+"#;
+        let exports = discover_wasm_exports(source).unwrap();
+
+        let wrappers = render_export_wrappers(&exports).unwrap();
+
+        assert!(wrappers.contains("class OrderWorkflow extends WorkflowEntrypoint"));
+        assert!(wrappers.contains("this.inner = new exports.OrderWorkflow(ctx, env);"));
+        assert!(wrappers
+            .contains("export const Counter = new Proxy(exports.Counter, classProxyHooks);"));
+        assert!(!wrappers.contains("new Proxy(exports.OrderWorkflow, classProxyHooks)"));
+    }
+
+    #[test]
+    fn rejects_a_workflow_marker_without_a_matching_class_export() {
+        let source = "export function __worker_workflow_entrypoint_MissingWorkflow() {}";
+        let exports = discover_wasm_exports(source).unwrap();
+
+        let error = render_export_wrappers(&exports).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("MissingWorkflow does not have a matching class export"));
+    }
+
+    #[test]
+    fn renders_workflow_subclasses_for_the_legacy_shim() {
+        let source = r#"
+export function __worker_workflow_entrypoint_OrderWorkflow() {}
+export class OrderWorkflow {}
+"#;
+        let exports = discover_wasm_exports(source).unwrap();
+
+        let wrappers = render_legacy_workflow_exports(&exports).unwrap();
+
+        assert!(wrappers.contains("export class OrderWorkflow extends WorkflowEntrypoint"));
+        assert!(wrappers.contains("this.inner = new imports.OrderWorkflow(ctx, env);"));
     }
 }

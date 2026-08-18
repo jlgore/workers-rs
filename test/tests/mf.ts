@@ -76,6 +76,12 @@ const mf_instance = new Miniflare({
           useSQLite: true,
         },
       },
+      workflows: {
+        TEST_WORKFLOW: {
+          name: "test-rust-workflow",
+          className: "TestWorkflow",
+        },
+      },
       kvNamespaces: ["SOME_NAMESPACE", "FILE_SIZES", "TEST"],
       serviceBindings: {
         async remote() {

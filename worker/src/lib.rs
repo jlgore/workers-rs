@@ -149,13 +149,15 @@ use std::result::Result as StdResult;
 #[doc(hidden)]
 pub use async_trait;
 pub use js_sys;
+#[doc(hidden)]
+pub use serde_wasm_bindgen;
 pub use url::Url;
 pub use wasm_bindgen;
 pub use wasm_bindgen_futures;
 pub use web_sys;
 
 pub use cf::{Cf, CfResponseProperties, TlsClientAuth};
-pub use worker_macros::{consume, durable_object, event, send};
+pub use worker_macros::{consume, durable_object, event, send, workflow};
 #[doc(hidden)]
 pub use worker_sys;
 pub use worker_sys::{console_debug, console_error, console_log, console_warn};
