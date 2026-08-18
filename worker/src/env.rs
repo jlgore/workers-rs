@@ -1,11 +1,13 @@
 use std::fmt::Display;
 
 use crate::analytics_engine::AnalyticsEngineDataset;
+use crate::artifacts::Artifacts;
 #[cfg(feature = "d1")]
 use crate::d1::D1Database;
 use crate::email::SendEmail;
 use crate::kv::KvStore;
 use crate::rate_limit::RateLimiter;
+use crate::workflows::Workflow;
 use crate::Ai;
 #[cfg(feature = "queue")]
 use crate::Queue;
@@ -47,6 +49,12 @@ impl Env {
 
     pub fn analytics_engine(&self, binding: &str) -> Result<AnalyticsEngineDataset> {
         self.get_binding::<AnalyticsEngineDataset>(binding)
+    }
+
+    /// Access an [Artifacts](https://developers.cloudflare.com/artifacts/)
+    /// namespace by the binding name configured in Wrangler.
+    pub fn artifacts(&self, binding: &str) -> Result<Artifacts> {
+        self.get_binding(binding)
     }
 
     /// Access Secret value bindings added to your Worker via the UI or `wrangler`:
@@ -136,6 +144,12 @@ impl Env {
     /// [`Email`](crate::Email) or a prebuilt
     /// [`EmailMessage`](crate::EmailMessage).
     pub fn send_email(&self, binding: &str) -> Result<SendEmail> {
+        self.get_binding(binding)
+    }
+
+    /// Access a [Workflows](https://developers.cloudflare.com/workflows/)
+    /// binding by the name configured in Wrangler.
+    pub fn workflow(&self, binding: &str) -> Result<Workflow> {
         self.get_binding(binding)
     }
 }

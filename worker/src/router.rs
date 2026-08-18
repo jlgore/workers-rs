@@ -4,13 +4,14 @@ use futures_util::future::LocalBoxFuture;
 use matchit::{Match, Router as MatchItRouter};
 
 use crate::{
+    artifacts::Artifacts,
     durable::ObjectNamespace,
     env::{Env, Secret, Var},
     http::Method,
     rate_limit::RateLimiter,
     request::Request,
     response::Response,
-    Bucket, Fetcher, KvStore, Result,
+    Bucket, Fetcher, KvStore, Result, Workflow,
 };
 
 type HandlerFn<D> = fn(Request, RouteContext<D>) -> Result<Response>;
@@ -110,6 +111,16 @@ impl<D> RouteContext<D> {
     /// Access a Rate Limiter by the binding name configured in your wrangler.toml file.
     pub fn rate_limiter(&self, binding: &str) -> Result<RateLimiter> {
         self.env.rate_limiter(binding)
+    }
+
+    /// Access an Artifacts namespace by its binding name.
+    pub fn artifacts(&self, binding: &str) -> Result<Artifacts> {
+        self.env.artifacts(binding)
+    }
+
+    /// Access a Workflow by its binding name.
+    pub fn workflow(&self, binding: &str) -> Result<Workflow> {
+        self.env.workflow(binding)
     }
 }
 

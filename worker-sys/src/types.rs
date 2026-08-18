@@ -1,5 +1,6 @@
 mod ai;
 mod analytics_engine;
+mod artifacts;
 mod bot_management;
 mod context;
 mod crypto;
@@ -22,9 +23,11 @@ mod tls_client_auth;
 mod version;
 mod websocket_pair;
 mod websocket_request_response_pair;
+mod workflows;
 
 pub use ai::*;
 pub use analytics_engine::*;
+pub use artifacts::*;
 pub use bot_management::*;
 pub use context::*;
 pub use crypto::*;
@@ -47,3 +50,4 @@ pub use tls_client_auth::*;
 pub use version::*;
 pub use websocket_pair::*;
 pub use websocket_request_response_pair::*;
+pub use workflows::*;

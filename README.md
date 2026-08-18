@@ -216,6 +216,51 @@ For more information about how to configure these bindings, see:
 - https://developers.cloudflare.com/workers/learning/using-durable-objects#configuring-durable-object-bindings
 - https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/
 
+### Artifacts and Workflows bindings
+
+Artifacts repositories and Workflow instances can be created and managed through bindings on
+`Env` (or the corresponding helpers on `RouteContext`):
+
+```rust
+use serde::Serialize;
+use worker::*;
+
+#[derive(Serialize)]
+struct Job {
+    repo: String,
+}
+
+async fn start(env: &Env) -> Result<String> {
+    let artifacts = env.artifacts("ARTIFACTS")?;
+    let repo = artifacts.create("build-output").await?;
+
+    let workflow = env.workflow("BUILD_WORKFLOW")?;
+    let options = WorkflowInstanceCreateOptions::new()
+        .id("build-123")
+        .params(Job { repo: repo.name });
+    let instance = workflow.create_with_options(&options).await?;
+
+    Ok(instance.id())
+}
+```
+
+Configure the binding names in Wrangler:
+
+```toml
+[[artifacts]]
+binding = "ARTIFACTS"
+namespace = "default"
+
+[[workflows]]
+name = "build-workflow"
+binding = "BUILD_WORKFLOW"
+class_name = "BuildWorkflow"
+```
+
+See the [Artifacts Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/)
+and [Workflows Workers API](https://developers.cloudflare.com/workflows/build/workers-api/) for
+platform configuration and behavior.
+
 ## Durable Objects
 
 ### Define a Durable Object in Rust
