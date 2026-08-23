@@ -151,6 +151,7 @@ pub use async_trait;
 pub use js_sys;
 #[doc(hidden)]
 pub use serde_wasm_bindgen;
+pub use url;
 pub use url::Url;
 pub use wasm_bindgen;
 pub use wasm_bindgen_futures;
