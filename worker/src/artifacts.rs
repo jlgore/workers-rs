@@ -299,7 +299,12 @@ pub struct ArtifactsCreateRepoResult {
     pub default_branch: String,
     pub remote: String,
     pub token: String,
-    pub token_expires_at: String,
+    /// Absent from the runtime response. The expiry is carried inside the token
+    /// itself, which has the form `art_v1_...?expires=<unix_timestamp>`, so
+    /// requiring a separate field made every create() fail after the repo had
+    /// already been created, leaving it orphaned.
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
 }
 
 /// Metadata for an Artifacts repository.
