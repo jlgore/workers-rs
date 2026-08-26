@@ -56,6 +56,26 @@ impl From<ArtifactsSys> for Artifacts {
     }
 }
 
+/// JS shims for RPC calls whose result is a stub rather than plain data.
+///
+/// Awaiting a promise that resolves to a JsRpcStub never settles from Rust,
+/// while the same await in JS resolves. Performing the call in JS and returning
+/// the stub inside a plain object sidesteps it: the resolved value is data, and
+/// the stub travels as one of its fields.
+mod rpc_shim {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(inline_js = r#"
+        export function rpc_get(binding, name) {
+          return Promise.resolve(binding.get(name)).then((handle) => ({ handle }));
+        }
+    "#)]
+    extern "C" {
+        pub fn rpc_get(binding: &JsValue, name: &str) -> js_sys::Promise;
+    }
+}
+
+
 impl Artifacts {
     /// Create a repository using the service defaults.
     pub async fn create(&self, name: impl AsRef<str>) -> Result<ArtifactsCreateRepoResult> {
@@ -83,9 +103,16 @@ impl Artifacts {
     }
 
     /// Get a handle to an existing repository.
+    ///
+    /// Routed through a JS shim. `get()` resolves to a JsRpcStub, and awaiting
+    /// a stub-valued promise never settles here even though the identical call
+    /// resolves in JS; wrapping the stub in a plain object makes the resolved
+    /// value ordinary data, which Rust can await.
     pub async fn get(&self, name: impl AsRef<str>) -> Result<ArtifactsRepo> {
-        let value = JsFuture::from(self.0.get(name.as_ref())?).await?;
-        Ok(ArtifactsRepo(value.unchecked_into()))
+        let wrapped = JsFuture::from(rpc_shim::rpc_get(self.0.as_ref(), name.as_ref())).await?;
+        let handle = js_sys::Reflect::get(&wrapped, &JsValue::from_str("handle"))
+            .map_err(|_| crate::Error::RustError("artifacts get returned no handle".into()))?;
+        Ok(ArtifactsRepo(handle.unchecked_into()))
     }
 
     /// Import a repository from an external HTTPS Git remote.
@@ -436,44 +463,15 @@ impl From<ArtifactsRepoSys> for ArtifactsRepo {
 }
 
 impl ArtifactsRepo {
-    pub fn id(&self) -> String {
-        self.0.id()
-    }
-
-    pub fn name(&self) -> String {
-        self.0.name()
-    }
-
-    pub fn description(&self) -> Option<String> {
-        self.0.description()
-    }
-
-    pub fn default_branch(&self) -> String {
-        self.0.default_branch()
-    }
-
-    pub fn created_at(&self) -> String {
-        self.0.created_at()
-    }
-
-    pub fn updated_at(&self) -> String {
-        self.0.updated_at()
-    }
-
-    pub fn last_push_at(&self) -> Option<String> {
-        self.0.last_push_at()
-    }
-
-    pub fn source(&self) -> Option<String> {
-        self.0.source()
-    }
-
-    pub fn read_only(&self) -> bool {
-        self.0.read_only()
-    }
-
-    pub fn remote(&self) -> String {
-        self.0.remote()
+    /// Fetch this repository's metadata.
+    ///
+    /// The handle returned by [`Artifacts::get`] is a JsRpcStub, which carries
+    /// no data properties: reading `remote` or `name` off it yields an RPC
+    /// proxy, and awaiting that is rejected because the service implements no
+    /// such method. Metadata is a call, not a field.
+    pub async fn info(&self) -> Result<ArtifactsRepoInfo> {
+        let value = JsFuture::from(self.0.info()?).await?;
+        Ok(serde_wasm_bindgen::from_value(value)?)
     }
 
     /// Create a write-scoped token using the service's default TTL.

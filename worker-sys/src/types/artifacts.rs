@@ -29,35 +29,12 @@ extern "C" {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub type ArtifactsRepo;
 
-    #[wasm_bindgen(method, getter)]
-    pub fn id(this: &ArtifactsRepo) -> String;
-
-    #[wasm_bindgen(method, getter)]
-    pub fn name(this: &ArtifactsRepo) -> String;
-
-    #[wasm_bindgen(method, getter)]
-    pub fn description(this: &ArtifactsRepo) -> Option<String>;
-
-    #[wasm_bindgen(method, getter, js_name = defaultBranch)]
-    pub fn default_branch(this: &ArtifactsRepo) -> String;
-
-    #[wasm_bindgen(method, getter, js_name = createdAt)]
-    pub fn created_at(this: &ArtifactsRepo) -> String;
-
-    #[wasm_bindgen(method, getter, js_name = updatedAt)]
-    pub fn updated_at(this: &ArtifactsRepo) -> String;
-
-    #[wasm_bindgen(method, getter, js_name = lastPushAt)]
-    pub fn last_push_at(this: &ArtifactsRepo) -> Option<String>;
-
-    #[wasm_bindgen(method, getter)]
-    pub fn source(this: &ArtifactsRepo) -> Option<String>;
-
-    #[wasm_bindgen(method, getter, js_name = readOnly)]
-    pub fn read_only(this: &ArtifactsRepo) -> bool;
-
-    #[wasm_bindgen(method, getter)]
-    pub fn remote(this: &ArtifactsRepo) -> String;
+    // The handle is a JsRpcStub: it has no data properties, so accessors
+    // declared here would return an RPC proxy rather than a value, and awaiting
+    // one is rejected outright ("the RPC receiver does not implement the method
+    // `remote`"). Metadata comes from info(), which answers with plain data.
+    #[wasm_bindgen(method, catch, js_name = info)]
+    pub fn info(this: &ArtifactsRepo) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(method, catch, js_name = createToken)]
     pub fn create_token(
