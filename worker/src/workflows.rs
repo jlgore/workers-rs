@@ -946,20 +946,21 @@ where
 {
     async fn execute(self) -> Result<T> {
         let callback = Rc::new(RefCell::new(self.callback));
-        let js_callback = Closure::wrap(Box::new(move |raw_context: JsValue| -> Promise {
-            let context = match WorkflowStepContext::from_raw(raw_context) {
-                Ok(context) => context,
-                Err(error) => return Promise::reject(&JsValue::from(error)),
-            };
-            let future = (callback.borrow_mut())(context);
+        let js_callback =
+            Closure::wrap_assert_unwind_safe(Box::new(move |raw_context: JsValue| -> Promise {
+                let context = match WorkflowStepContext::from_raw(raw_context) {
+                    Ok(context) => context,
+                    Err(error) => return Promise::reject(&JsValue::from(error)),
+                };
+                let future = (callback.borrow_mut())(context);
 
-            future_to_promise(AssertUnwindSafe(async move {
-                let output = future.await.map_err(JsValue::from)?;
-                serde_wasm_bindgen::to_value(&output)
-                    .map_err(Error::from)
-                    .map_err(JsValue::from)
-            }))
-        }) as Box<dyn FnMut(JsValue) -> Promise>);
+                future_to_promise(AssertUnwindSafe(async move {
+                    let output = future.await.map_err(JsValue::from)?;
+                    serde_wasm_bindgen::to_value(&output)
+                        .map_err(Error::from)
+                        .map_err(JsValue::from)
+                }))
+            }) as Box<dyn FnMut(JsValue) -> Promise>);
         let function: &Function = js_callback.as_ref().unchecked_ref();
         let promise = match self.config {
             Some(config) => {
@@ -1022,17 +1023,18 @@ where
 {
     async fn execute(self) -> Result<JsValue> {
         let callback = Rc::new(RefCell::new(self.callback));
-        let js_callback = Closure::wrap(Box::new(move |raw_context: JsValue| -> Promise {
-            let context = match WorkflowStepContext::from_raw(raw_context) {
-                Ok(context) => context,
-                Err(error) => return Promise::reject(&JsValue::from(error)),
-            };
-            let future = (callback.borrow_mut())(context);
+        let js_callback =
+            Closure::wrap_assert_unwind_safe(Box::new(move |raw_context: JsValue| -> Promise {
+                let context = match WorkflowStepContext::from_raw(raw_context) {
+                    Ok(context) => context,
+                    Err(error) => return Promise::reject(&JsValue::from(error)),
+                };
+                let future = (callback.borrow_mut())(context);
 
-            future_to_promise(AssertUnwindSafe(async move {
-                future.await.map_err(JsValue::from)
-            }))
-        }) as Box<dyn FnMut(JsValue) -> Promise>);
+                future_to_promise(AssertUnwindSafe(async move {
+                    future.await.map_err(JsValue::from)
+                }))
+            }) as Box<dyn FnMut(JsValue) -> Promise>);
         let function: &Function = js_callback.as_ref().unchecked_ref();
         let promise = match self.config {
             Some(config) => {
