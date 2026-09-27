@@ -62,7 +62,40 @@ enum Closing {
     None,
 }
 
-/// Represents an outbound TCP connection from your Worker.
+/// A trait used to represent any viable Socket type that can be used in the Worker.
+/// The only requirement is that it be convertible from a `worker_sys::Socket`.
+pub trait FromSocket: std::marker::Sized {
+    fn from_raw(
+        socket: worker_sys::Socket,
+    ) -> std::result::Result<Self, impl Into<Box<dyn std::error::Error>>>;
+}
+
+impl FromSocket for worker_sys::Socket {
+    fn from_raw(
+        socket: worker_sys::Socket,
+    ) -> std::result::Result<Self, impl Into<Box<dyn std::error::Error>>> {
+        Ok::<worker_sys::Socket, Error>(socket)
+    }
+}
+
+impl From<worker_sys::Socket> for Socket {
+    fn from(socket: worker_sys::Socket) -> Self {
+        Socket::new(socket)
+    }
+}
+
+impl FromSocket for Socket {
+    fn from_raw(
+        socket: worker_sys::Socket,
+    ) -> std::result::Result<Self, impl Into<Box<dyn std::error::Error>>> {
+        Ok::<Socket, Error>(Socket::new(socket))
+    }
+}
+
+/// Represents a TCP socket connection.
+///
+/// Inbound sockets passed to an `#[event(connect)]` handler are closed by the runtime
+/// when the handler returns. Any later reads or writes (e.g. from `wait_until`) will fail.
 #[derive(Debug)]
 pub struct Socket {
     inner: worker_sys::Socket,
@@ -89,6 +122,15 @@ impl Socket {
             write: None,
             close: None,
         }
+    }
+
+    /// Hands this inbound socket to the Node-style server listening on its
+    /// local port, such as a Tokio `TcpListener` bound there, and resolves
+    /// once the connection closes. Await it as the tail of the `connect`
+    /// handler: the handler's completion closes the socket.
+    pub async fn handle_as_node_connection(self) -> Result<()> {
+        JsFuture::from(worker_sys::handle_as_node_connection(&self.inner)?).await?;
+        Ok(())
     }
 
     /// Closes the TCP socket. Both the readable and writable streams are forcibly closed.
@@ -265,6 +307,12 @@ impl AsyncWrite for Socket {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        // An outstanding write owns the stream's writer lock. Finish it before
+        // closing the WritableStream, as required by AsyncWrite::poll_shutdown.
+        match self.as_mut().poll_flush(cx) {
+            Poll::Ready(Ok(())) => {}
+            pending_or_error => return pending_or_error,
+        }
         fn handle_future(cx: &mut Context<'_>, mut fut: JsFuture) -> (Closing, Poll<IoResult<()>>) {
             match fut.poll_unpin(cx) {
                 Poll::Pending => (Closing::Pending(fut), Poll::Pending),
@@ -280,6 +328,91 @@ impl AsyncWrite for Socket {
         };
         self.close = Some(new_closing);
         poll
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod shutdown_tests {
+    use super::*;
+    use futures_util::{future::poll_fn, task::noop_waker_ref};
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen(inline_js = "
+        export function pendingWriteSocket() {
+            const fixture = { closed: false, bytes: [] };
+            let started;
+            fixture.started = new Promise(resolve => { started = resolve; });
+            fixture.readable = new ReadableStream();
+            fixture.writable = new WritableStream({
+                write(chunk) {
+                    fixture.bytes.push(...chunk);
+                    return new Promise((resolve, reject) => {
+                        fixture.resolve = resolve;
+                        fixture.reject = reject;
+                        started();
+                    });
+                },
+                close() { fixture.closed = true; }
+            });
+            return fixture;
+        }
+        export async function waitForWrite(fixture) { await fixture.started; }
+        export function finishWrite(fixture, fail) {
+            if (fail) fixture.reject(new Error('write failed'));
+            else fixture.resolve();
+        }
+        export function wasClosed(fixture) { return fixture.closed; }
+        export function writtenBytes(fixture) { return new Uint8Array(fixture.bytes); }
+    ")]
+    extern "C" {
+        #[wasm_bindgen(js_name = pendingWriteSocket)]
+        fn pending_write_socket() -> JsValue;
+        #[wasm_bindgen(js_name = waitForWrite)]
+        async fn wait_for_write(fixture: &JsValue);
+        #[wasm_bindgen(js_name = finishWrite)]
+        fn finish_write(fixture: &JsValue, fail: bool);
+        #[wasm_bindgen(js_name = wasClosed)]
+        fn was_closed(fixture: &JsValue) -> bool;
+        #[wasm_bindgen(js_name = writtenBytes)]
+        fn written_bytes(fixture: &JsValue) -> Vec<u8>;
+    }
+
+    async fn start_write() -> (Socket, JsValue) {
+        let fixture = pending_write_socket();
+        let mut socket = Socket::new(fixture.clone().unchecked_into());
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(Pin::new(&mut socket)
+            .poll_write(&mut cx, b"hello")
+            .is_pending());
+        wait_for_write(&fixture).await;
+        assert!(socket.writable.locked());
+        assert!(Pin::new(&mut socket).poll_shutdown(&mut cx).is_pending());
+        assert!(!was_closed(&fixture));
+        (socket, fixture)
+    }
+
+    #[wasm_bindgen_test]
+    async fn shutdown_waits_for_pending_write() {
+        let (mut socket, fixture) = start_write().await;
+        finish_write(&fixture, false);
+        poll_fn(|cx| Pin::new(&mut socket).poll_shutdown(cx))
+            .await
+            .unwrap();
+        assert!(!socket.writable.locked());
+        assert!(was_closed(&fixture));
+        assert_eq!(written_bytes(&fixture), b"hello");
+    }
+
+    #[wasm_bindgen_test]
+    async fn shutdown_propagates_pending_write_error() {
+        let (mut socket, fixture) = start_write().await;
+        finish_write(&fixture, true);
+        let error = poll_fn(|cx| Pin::new(&mut socket).poll_shutdown(cx))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("write failed"));
+        assert!(!was_closed(&fixture));
     }
 }
 

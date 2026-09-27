@@ -75,7 +75,6 @@ mod rpc_shim {
     }
 }
 
-
 impl Artifacts {
     /// Create a repository using the service defaults.
     pub async fn create(&self, name: impl AsRef<str>) -> Result<ArtifactsCreateRepoResult> {
