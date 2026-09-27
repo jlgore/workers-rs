@@ -11,11 +11,13 @@ use clap::Parser;
 
 const SHIM_FILE: &str = include_str!("./js/shim.js");
 const SHIM_UNWIND_FILE: &str = include_str!("./js/shim-unwind.js");
+const SHIM_EMSCRIPTEN_FILE: &str = include_str!("./js/shim-emscripten.js");
 
 pub(crate) mod binary;
 mod build;
 mod build_lock;
 mod emoji;
+mod emscripten;
 mod lockfile;
 mod main_legacy;
 mod producers;
@@ -85,8 +87,11 @@ pub fn main() -> Result<()> {
 
     builder.init()?;
 
+    let emscripten = builder.emscripten;
     let module_target = !no_panic_recovery && env::var("CUSTOM_SHIM").is_err();
-    if module_target {
+    if emscripten {
+        builder.run()?;
+    } else if module_target {
         builder.extra_args.extend_from_slice(&[
             "--experimental-reset-state-function".into(),
             "--force-enable-abort-handler".into(),
@@ -105,8 +110,10 @@ pub fn main() -> Result<()> {
 
     producers::inject_workers_rs_sdk_metadata(&staging_dir, VERSION)?;
 
-    if module_target {
-        let shim = if builder.panic_unwind {
+    if emscripten || module_target {
+        let shim = if emscripten {
+            SHIM_EMSCRIPTEN_FILE
+        } else if builder.panic_unwind {
             SHIM_UNWIND_FILE
         } else {
             SHIM_FILE
@@ -116,12 +123,12 @@ pub fn main() -> Result<()> {
         fs::write(&shim_path, shim)
             .with_context(|| format!("Failed to write {}", shim_path.display()))?;
 
-        add_export_wrappers(&staging_dir)?;
+        add_export_wrappers(&staging_dir, emscripten)?;
 
         update_package_json(&staging_dir)?;
 
         let esbuild_path = Esbuild.get_binary(None)?.0;
-        bundle(&staging_dir, &esbuild_path)?;
+        bundle(&staging_dir, &esbuild_path, emscripten)?;
 
         fix_wasm_import(&staging_dir)?;
 
@@ -160,8 +167,12 @@ fn discover_wasm_exports(content: &str) -> Result<WasmExports> {
 
     // Extract ESM exports from the wasm-bindgen generated output. This is specialized to what
     // wasm-bindgen currently emits and should eventually be replaced with Wasm export analysis.
-    for line in content.lines() {
-        let function_name = if let Some(rest) = line.strip_prefix("export function") {
+    // Emscripten output indents (or minifies) the wasm-bindgen exports.
+    for line in export_decls(content) {
+        let function_name = if let Some(rest) = line
+            .strip_prefix("export function")
+            .or_else(|| line.strip_prefix("export async function"))
+        {
             rest.find('(').map(|position| rest[..position].trim())
         } else if let Some(rest) = line.strip_prefix("export {") {
             rest.find(" as ").and_then(|position| {
@@ -193,11 +204,18 @@ fn discover_wasm_exports(content: &str) -> Result<WasmExports> {
             continue;
         }
 
+        // Emscripten output declares classes as `export var Name = class Name {`.
         if let Some(rest) = line.strip_prefix("export class ") {
             if let Some(brace_position) = rest.find('{') {
                 exports
                     .classes
                     .push(rest[..brace_position].trim().to_owned());
+            }
+        } else if let Some(rest) = line.strip_prefix("export var ") {
+            if let Some((class_name, definition)) = rest.split_once('=') {
+                if definition.trim_start().starts_with("class") {
+                    exports.classes.push(class_name.trim().to_owned());
+                }
             }
         }
     }
@@ -224,6 +242,7 @@ fn generate_handlers(out_dir: &Path) -> Result<String> {
             || func_name == "queue"
             || func_name == "scheduled"
             || func_name == "email"
+            || func_name == "connect"
         {
             // TODO: Switch these over to https://github.com/wasm-bindgen/wasm-bindgen/pull/4757
             // once that lands.
@@ -243,7 +262,20 @@ fn generate_handlers(out_dir: &Path) -> Result<String> {
 
 static SYSTEM_FNS: &[&str] = &["__wbg_reset_state", "__worker_init_state"];
 
-fn render_export_wrappers(exports: &WasmExports) -> Result<String> {
+/// Each `export` declaration in the module text, starting at the keyword,
+/// whether the module is one declaration per line or minified.
+fn export_decls(content: &str) -> impl Iterator<Item = &str> {
+    content.match_indices("export ").filter_map(move |(i, _)| {
+        let boundary = i == 0
+            || content[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace() || c == ';' || c == '}');
+        boundary.then(|| &content[i..])
+    })
+}
+
+fn render_export_wrappers(exports: &WasmExports, plain: bool) -> Result<String> {
     validate_workflow_entrypoints(exports)?;
 
     let mut wrappers = String::new();
@@ -253,8 +285,22 @@ fn render_export_wrappers(exports: &WasmExports) -> Result<String> {
             .iter()
             .any(|entrypoint| entrypoint == class_name)
         {
+            let class = format!(
+                "class {class_name} extends WorkflowEntrypoint {{\n    constructor(ctx, env) {{\n      super(ctx, env);\n      this.inner = new exports.{class_name}(ctx, env);\n    }}\n\n    run(event, step) {{\n      return this.inner.run(event, step);\n    }}\n  }}"
+            );
+            if plain {
+                wrappers.push_str(&format!("export const {class_name} = {class};\n"));
+            } else {
+                wrappers.push_str(&format!(
+                    "export const {class_name} = new Proxy(\n  {class},\n  classProxyHooks,\n);\n"
+                ));
+            }
+        } else if plain {
+            // The runtime only exposes RPC on classes deriving from DurableObject.
             wrappers.push_str(&format!(
-                "export const {class_name} = new Proxy(\n  class {class_name} extends WorkflowEntrypoint {{\n    constructor(ctx, env) {{\n      super(ctx, env);\n      this.inner = new exports.{class_name}(ctx, env);\n    }}\n\n    run(event, step) {{\n      return this.inner.run(event, step);\n    }}\n  }},\n  classProxyHooks,\n);\n"
+                "Object.setPrototypeOf(exports.{class_name}.prototype, DurableObject.prototype);\n\
+                 Object.setPrototypeOf(exports.{class_name}, DurableObject);\n\
+                 export const {class_name} = exports.{class_name};\n"
             ));
         } else {
             wrappers.push_str(&format!(
@@ -293,7 +339,7 @@ fn render_legacy_workflow_exports(exports: &WasmExports) -> Result<String> {
     Ok(wrappers)
 }
 
-fn add_export_wrappers(out_dir: &Path) -> Result<()> {
+fn add_export_wrappers(out_dir: &Path, plain: bool) -> Result<()> {
     let index_path = output_path(out_dir, "index.js");
     let content = fs::read_to_string(&index_path)
         .with_context(|| format!("Failed to read {}", index_path.display()))?;
@@ -309,7 +355,7 @@ fn add_export_wrappers(out_dir: &Path) -> Result<()> {
         "import { WorkflowEntrypoint } from \"cloudflare:workers\";"
     };
     output = output.replace("$WORKFLOW_IMPORT", workflow_import);
-    output.push_str(&render_export_wrappers(&exports)?);
+    output.push_str(&render_export_wrappers(&exports, plain)?);
     fs::write(&shim_path, output)
         .with_context(|| format!("Failed to write {}", shim_path.display()))?;
     Ok(())
@@ -443,7 +489,7 @@ where
 }
 
 // Bundles the snippets and worker-related code into a single file.
-fn bundle(out_dir: &Path, esbuild_path: &Path) -> Result<()> {
+fn bundle(out_dir: &Path, esbuild_path: &Path, emscripten: bool) -> Result<()> {
     let no_minify = !matches!(env::var("NO_MINIFY"), Err(VarError::NotPresent));
     let path = out_dir
         .canonicalize()
@@ -454,16 +500,19 @@ fn bundle(out_dir: &Path, esbuild_path: &Path) -> Result<()> {
     let mut command = Command::new(esbuild_path);
     command.args([
         "--external:./index_bg.wasm",
-        "--external:cloudflare:email",
-        "--external:cloudflare:sockets",
-        "--external:cloudflare:workers",
-        "--external:cloudflare:workflows",
+        "--external:cloudflare:*",
         "--format=esm",
         "--bundle",
         "./shim.js",
         "--outfile=index.js",
         "--allow-overwrite",
     ]);
+
+    // Emscripten's node environment glue imports Node builtins, served by
+    // nodejs_compat in the runtime.
+    if emscripten {
+        command.args(["--external:node:*", "--platform=node"]);
+    }
 
     if !no_minify {
         command.arg("--minify");
@@ -545,7 +594,7 @@ export class OrderWorkflow {}
 "#;
         let exports = discover_wasm_exports(source).unwrap();
 
-        let wrappers = render_export_wrappers(&exports).unwrap();
+        let wrappers = render_export_wrappers(&exports, false).unwrap();
 
         assert!(wrappers.contains("class OrderWorkflow extends WorkflowEntrypoint"));
         assert!(wrappers.contains("this.inner = new exports.OrderWorkflow(ctx, env);"));
@@ -559,7 +608,7 @@ export class OrderWorkflow {}
         let source = "export function __worker_workflow_entrypoint_MissingWorkflow() {}";
         let exports = discover_wasm_exports(source).unwrap();
 
-        let error = render_export_wrappers(&exports).unwrap_err();
+        let error = render_export_wrappers(&exports, false).unwrap_err();
 
         assert!(error
             .to_string()
